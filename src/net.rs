@@ -1,33 +1,72 @@
 use regex::Regex;
-use std::{net::{Ipv4Addr, Ipv6Addr}, marker::PhantomData, mem::size_of, ops::{BitAnd, Not, BitOr}};
+use std::{
+    fmt::{Debug, Display},
+    iter::Step,
+    mem::size_of,
+    net::{Ipv4Addr, Ipv6Addr},
+    ops::{BitAnd, BitOr, Not},
+};
 
 pub trait IpByteTypeHelper {
     const MAX: Self;
     const BITS: u8;
     const ONE: Self;
+    const ZERO: Self;
+
+    fn pow(base: u32, pow: u32) -> Self;
 }
 
 impl IpByteTypeHelper for u32 {
     const MAX: u32 = u32::MAX;
     const BITS: u8 = u32::BITS as u8;
     const ONE: u32 = 1u32;
+    const ZERO: u32 = 0u32;
+
+    fn pow(base: u32, pow: u32) -> Self {
+        base.pow(pow)
+    }
 }
 
 impl IpByteTypeHelper for u128 {
     const MAX: u128 = u128::MAX;
     const BITS: u8 = u128::BITS as u8;
     const ONE: u128 = 1u128;
+    const ZERO: u128 = 0u128;
+
+    fn pow(base: u32, pow: u32) -> Self {
+        base.pow(pow).into()
+    }
 }
 
-pub trait IpByteType: IpByteTypeHelper + num::Unsigned + std::ops::Shl<u8, Output = Self> + BitAnd + Not + BitOr + Clone {}
-impl<T> IpByteType for T where T: IpByteTypeHelper + num::Unsigned + std::ops::Shl<u8, Output = Self> + BitAnd + Not + BitOr + Clone {}
+pub trait IpByteType:
+    IpByteTypeHelper
+    + num::Unsigned
+    + std::ops::Shl<u8, Output = Self>
+    + BitAnd
+    + Not
+    + BitOr
+    + Clone
+    + Step
+{
+}
+impl<T> IpByteType for T where
+    T: IpByteTypeHelper
+        + num::Unsigned
+        + std::ops::Shl<u8, Output = Self>
+        + BitAnd
+        + Not
+        + BitOr
+        + Clone
+        + Step
+{
+}
 
 pub trait IpTrait<Bits: IpByteType> {
     fn from_proxy(bits: Bits) -> Self;
     fn bits(&self) -> Bits;
 }
 
-impl<> IpTrait<u32> for Ipv4Addr {
+impl IpTrait<u32> for Ipv4Addr {
     fn from_proxy(bits: u32) -> Self {
         Ipv4Addr::from(bits)
     }
@@ -37,7 +76,7 @@ impl<> IpTrait<u32> for Ipv4Addr {
     }
 }
 
-impl<> IpTrait<u128> for Ipv6Addr {
+impl IpTrait<u128> for Ipv6Addr {
     fn from_proxy(bits: u128) -> Self {
         Ipv6Addr::from(bits)
     }
@@ -48,31 +87,53 @@ impl<> IpTrait<u128> for Ipv6Addr {
 }
 
 pub trait IpInfo {
-    type Bits: IpByteType 
-    + From<<Self::Bits as BitAnd>::Output> 
-    + From<<Self::Bits as BitOr>::Output>
-    + From<<Self::Bits as Not>::Output>;
-    type IpType: IpTrait<Self::Bits> + Copy + Clone;
-}
+    type Bits: IpByteType
+        + From<<Self::Bits as BitAnd>::Output>
+        + From<<Self::Bits as BitOr>::Output>
+        + From<<Self::Bits as Not>::Output>
+        + Copy
+        + Clone;
+    type IpType: IpTrait<Self::Bits> + Copy + Clone + Debug + Display;
 
+    fn calc_subnet_address(
+        sna: Self::Bits,
+        sn: Self::Bits,
+        target_cidr: u8,
+        net_idx: Self::Bits,
+    ) -> Self::IpType;
+}
 
 #[derive(Debug)]
 pub struct V4 {}
 impl IpInfo for V4 {
     type IpType = Ipv4Addr;
     type Bits = u32;
-}
 
+    fn calc_subnet_address(sna: u32, sn: u32, target_cidr: u8, net_idx: u32) -> Ipv4Addr {
+        let mask = !sn & sn_from_cidr_gen_bits::<Self>(target_cidr);
+
+        let num: u32 = (net_idx << (u32::BITS - target_cidr as u32)) & mask;
+        Ipv4Addr::from(num | sna)
+    }
+}
 
 #[derive(Debug)]
 pub struct V6 {}
 impl IpInfo for V6 {
     type IpType = Ipv6Addr;
     type Bits = u128;
+
+    fn calc_subnet_address(sna: u128, sn: u128, target_cidr: u8, net_idx: u128) -> Ipv6Addr {
+        let mask = !sn & sn_from_cidr_gen_bits::<Self>(target_cidr);
+
+        let num: u128 = (net_idx << (u128::BITS - target_cidr as u32)) & mask;
+        Ipv6Addr::from(num | sna)
+    }
 }
 
 pub enum IpType {
-    V4, V6
+    V4,
+    V6,
 }
 
 pub fn sn_from_cidr_gen_bits<Ip: IpInfo>(cidr: u8) -> Ip::Bits {
@@ -132,7 +193,6 @@ pub type NetV6 = GenNet<V6>;
 
 impl<Ip: IpInfo> GenNet<Ip> {
     pub fn new(ip: Ip::IpType, cidr: u8) -> Self {
-        
         if size_of::<Ip::Bits>() * 8 < cidr as usize {
             panic!("CIDR to big");
         }
@@ -143,14 +203,14 @@ impl<Ip: IpInfo> GenNet<Ip> {
         let bc_bits = bc.bits().clone();
         let from = na_bits + Ip::Bits::ONE;
         let until = bc_bits - Ip::Bits::ONE;
-        
+
         GenNet {
             initial_ip: ip,
             na,
             bc,
             host_from: Ip::IpType::from_proxy(from),
             host_until: Ip::IpType::from_proxy(until),
-            cidr
+            cidr,
         }
     }
 
@@ -158,7 +218,7 @@ impl<Ip: IpInfo> GenNet<Ip> {
         self.na
     }
 
-    pub fn network_address_u32(&self) -> Ip::Bits {
+    pub fn network_address_bits(&self) -> Ip::Bits {
         self.na.bits()
     }
 
@@ -166,15 +226,15 @@ impl<Ip: IpInfo> GenNet<Ip> {
         self.bc
     }
 
-    pub fn broadcast_address_u32(&self) -> Ip::Bits {
+    pub fn broadcast_address_bits(&self) -> Ip::Bits {
         self.bc.bits()
     }
 
     pub fn subnetmask(&self) -> Ip::IpType {
-       sn_from_cidr_gen::<Ip>(self.cidr)
+        sn_from_cidr_gen::<Ip>(self.cidr)
     }
 
-    pub fn subnetmask_u32(&self) -> Ip::Bits {
+    pub fn subnetmask_bits(&self) -> Ip::Bits {
         sn_from_cidr_gen_bits::<Ip>(self.cidr)
     }
 
@@ -182,7 +242,7 @@ impl<Ip: IpInfo> GenNet<Ip> {
         (self.host_from, self.host_until)
     }
 
-    pub fn host_u32(&self) -> (Ip::Bits, Ip::Bits) {
+    pub fn host_bits(&self) -> (Ip::Bits, Ip::Bits) {
         (self.host_from.bits(), self.host_until.bits())
     }
 
@@ -197,23 +257,22 @@ impl<Ip: IpInfo> GenNet<Ip> {
 
 impl IpParse for NetV4 {
     fn parse(text: &str) -> Self {
-        let re = Regex::new(r"^(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(?P<cidr>\d{1,2}).?$").unwrap();
+        let re = Regex::new(r"^(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(?P<cidr>\d{1,2}).?$")
+            .unwrap();
         let caps = re.captures(text).unwrap();
         let ip = caps.name("ip").unwrap();
         let cidr = caps.name("cidr").unwrap();
-        
+
         NetV4::new(ip.as_str().parse().unwrap(), cidr.as_str().parse().unwrap())
     }
 }
 
 impl IpParse for NetV6 {
     fn parse(text: &str) -> Self {
-        todo!("Regex fehlt noch");
-        let re = Regex::new(r"^(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(?P<cidr>\d{1,2}).?$").unwrap();
+        let re = Regex::new(r"^(?P<ip>([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))/(?P<cidr>\d{1,2}).?$").unwrap();
         let caps = re.captures(text).unwrap();
         let ip = caps.name("ip").unwrap();
         let cidr = caps.name("cidr").unwrap();
-        
         NetV6::new(ip.as_str().parse().unwrap(), cidr.as_str().parse().unwrap())
     }
 }

@@ -10,3 +10,4 @@ rand = "0.8.5"
 regex = "1.7.1"
 clap = { version = "4.1.6", features = ["derive"] }
 num = "0.4.0"
+colored = "2.0.0"
